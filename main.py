@@ -26,14 +26,15 @@ load_dotenv()
 # Get credentials from environment variables
 username = os.getenv('EZDERM_USERNAME')
 password = os.getenv('EZDERM_PASSWORD')
-email_address = os.getenv('EMAIL_ADDRESS')
-email_password = os.getenv('EMAIL_PASSWORD')
+email_address = os.getenv('EMAIL_ADDRESS') # Email used to send reports
+email_password = os.getenv('EMAIL_PASSWORD') # App password for the sender email
 
-# Determine the absolute path of the script's directory (less critical on Heroku for this script)
-# script_dir = os.path.dirname(os.path.abspath(__file__)) # We'll use /tmp for dynamic files
+# Client time zone (CST/CDT)
+# This is used for determining report periods and for the scheduler workaround logic.
+cst = pytz.timezone("America/Chicago")
 
 # Set up download directory - Heroku allows writing to /tmp
-download_dir = "/tmp/downloads" # Correct for Heroku's ephemeral filesystem
+download_dir = "/tmp/downloads"
 os.makedirs(download_dir, exist_ok=True)
 
 # Set up Chrome options for Heroku
@@ -42,53 +43,72 @@ chrome_options.add_argument("--headless")
 chrome_options.add_argument("--disable-gpu")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
-# chrome_options.add_argument("--single-process") # Often not needed with newer Chrome/ChromeDriver
+# chrome_options.add_argument("--single-process") # Often not needed
 
-# --- HEROKU CHANGE: Use Chrome binary location provided by buildpack ---
-# Heroku buildpacks typically set GOOGLE_CHROME_BIN or place chrome in PATH
+# Use Chrome binary location provided by Heroku buildpack
 chrome_bin_path = os.getenv('GOOGLE_CHROME_BIN')
 if chrome_bin_path:
     chrome_options.binary_location = chrome_bin_path
 else:
-    print("Warning: GOOGLE_CHROME_BIN not set. Relying on Chrome being in PATH.")
-# If the buildpack adds Chrome to PATH, binary_location might not be strictly necessary.
+    # This print statement will appear in Heroku logs if the variable isn't set.
+    print("Warning: GOOGLE_CHROME_BIN environment variable not set. Relying on Chrome being in PATH.")
 
-# Configure downloads
+# Configure downloads preferences for Chrome
 chrome_options.add_experimental_option("prefs", {
     "download.default_directory": download_dir,
     "download.prompt_for_download": False,
     "download.directory_upgrade": True,
-    "safebrowsing.enabled": True # Corrected from "safeBrowse.enabled"
+    "safebrowsing.enabled": True # Ensures that downloads are not blocked by safebrowsing
 })
 
-# --- HEROKU CHANGE: Use ChromeDriver path provided by buildpack or rely on PATH ---
+# Use ChromeDriver path provided by Heroku buildpack or rely on it being in PATH
 chromedriver_path = os.getenv('CHROMEDRIVER_PATH')
 if chromedriver_path:
     print(f"Using CHROMEDRIVER_PATH: {chromedriver_path}")
     service = Service(executable_path=chromedriver_path)
 else:
-    print("Warning: CHROMEDRIVER_PATH not set. Relying on chromedriver being in PATH.")
-    service = Service() # Selenium will try to find chromedriver in PATH
+    print("Warning: CHROMEDRIVER_PATH environment variable not set. Relying on chromedriver being in PATH.")
+    service = Service() # Selenium will attempt to find chromedriver in the system PATH
 
-# Client time zone (CST)
-cst = pytz.timezone("America/Chicago")
-
-def get_report_period(report_type, today):
+def get_report_period(report_type, today_in_cst):
+    """
+    Determines the reporting period string and text based on the report type and current date.
+    Args:
+        report_type (str): 'daily', 'weekly', or 'monthly'.
+        today_in_cst (datetime): The current datetime object localized to CST/CDT.
+    Returns:
+        tuple: (period_string, period_text_for_email)
+    """
     if report_type == "daily":
-        return today.strftime("%Y-%m-%d"), f"Daily report for {today.strftime('%Y-%m-%d')}"
+        # Daily report is for the current day (today_in_cst)
+        return today_in_cst.strftime("%Y-%m-%d"), f"Daily report for {today_in_cst.strftime('%Y-%m-%d')}"
     elif report_type == "weekly":
-        end_date = today
-        start_date = today - timedelta(days=6)
+        # Weekly report covers the last 7 days ending on today_in_cst (which should be a Sunday)
+        end_date = today_in_cst
+        start_date = end_date - timedelta(days=6) # Assuming Sunday, this goes back to Monday
         return f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}", \
                f"Weekly report for {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
     elif report_type == "monthly":
-        first_day_of_current_month = today.replace(day=1)
+        # Monthly report is for the entire previous calendar month
+        first_day_of_current_month = today_in_cst.replace(day=1)
         last_day_of_previous_month = first_day_of_current_month - timedelta(days=1)
         return last_day_of_previous_month.strftime("%Y-%B"), f"Monthly report for {last_day_of_previous_month.strftime('%B %Y')}"
     else:
-        raise ValueError("Invalid report type")
+        raise ValueError(f"Invalid report type: {report_type}")
 
 def send_email(subject, html_body, to_email, attachment_path=None):
+    """
+    Sends an email with optional attachment.
+    Args:
+        subject (str): Email subject.
+        html_body (str): Email body in HTML format.
+        to_email (str): Recipient's email address.
+        attachment_path (str, optional): Path to the file to attach. Defaults to None.
+    """
+    if not email_address or not email_password:
+        print("Error: Sender email address or password not configured. Cannot send email.")
+        return
+
     msg = MIMEMultipart()
     msg['From'] = email_address
     msg['To'] = to_email
@@ -96,48 +116,67 @@ def send_email(subject, html_body, to_email, attachment_path=None):
     msg.attach(MIMEText(html_body, 'html'))
 
     if attachment_path:
-        with open(attachment_path, 'rb') as f:
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(f.read())
-        encoders.encode_base64(part)
-        part.add_header(
-            'Content-Disposition',
-            f'attachment; filename={os.path.basename(attachment_path)}'
-        )
-        msg.attach(part)
+        try:
+            with open(attachment_path, 'rb') as f:
+                part = MIMEBase('application', 'octet-stream')
+                part.set_payload(f.read())
+            encoders.encode_base64(part)
+            part.add_header(
+                'Content-Disposition',
+                f'attachment; filename="{os.path.basename(attachment_path)}"' # Added quotes for safety
+            )
+            msg.attach(part)
+        except FileNotFoundError:
+            print(f"Error: Attachment file not found at {attachment_path}. Email will be sent without attachment.")
+        except Exception as e:
+            print(f"Error attaching file {attachment_path}: {e}. Email will be sent without attachment.")
 
-    with smtplib.SMTP('smtp.gmail.com', 587) as server:
-        server.starttls()
-        server.login(email_address, email_password)
-        server.send_message(msg)
+
+    try:
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(email_address, email_password)
+            server.send_message(msg)
+        print(f"Email sent successfully to {to_email}.")
+    except smtplib.SMTPAuthenticationError:
+        print("SMTP Authentication Error: Check email_address and email_password (App Password).")
+    except Exception as e:
+        print(f"Failed to send email to {to_email}: {e}")
 
 def run_report_generation(report_type):
+    """
+    Main function to log in to EZDERM, download, process, and email reports.
+    Args:
+        report_type (str): 'daily', 'weekly', or 'monthly'.
+    """
     # Check if essential credentials are loaded
-    if not all([username, password, email_address, email_password]):
-        missing_vars = [var for var in ['EZDERM_USERNAME', 'EZDERM_PASSWORD', 'EMAIL_ADDRESS', 'EMAIL_PASSWORD'] if not os.getenv(var)]
-        error_msg = f"Critical Error: Missing one or more environment variables: {', '.join(missing_vars)}. Cannot proceed."
+    required_env_vars = ['EZDERM_USERNAME', 'EZDERM_PASSWORD', 'EMAIL_ADDRESS', 'EMAIL_PASSWORD']
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    if missing_vars:
+        error_msg = f"Critical Error: Missing environment variables: {', '.join(missing_vars)}. Cannot proceed."
         print(error_msg)
-        # Attempt to send an email if email_address and email_password are set for admin notification
-        if email_address and email_password:
-            try:
-                send_email("EZDERM Reporter - CRITICAL CONFIG ERROR", error_msg.replace('\n', '<br>'), "gio@gervainlabs.com")
-            except Exception as email_err:
-                print(f"Failed to send critical config error email: {email_err}")
+        admin_email_recipient = os.getenv("ADMIN_EMAIL", "gio@gervainlabs.com") # Default admin email
+        if email_address and email_password: # Attempt to notify admin if possible
+             send_email("EZDERM Reporter - CRITICAL CONFIG ERROR", error_msg.replace('\n', '<br>'), admin_email_recipient)
+        else:
+            print("Cannot send admin notification email due to missing sender credentials.")
         sys.exit(1) # Exit script if config is missing
 
     driver = None # Initialize driver to None for the finally block
     try:
-        print("Initializing Chrome driver...")
+        print(f"Initializing Chrome driver for {report_type} report...")
         driver = webdriver.Chrome(service=service, options=chrome_options)
         print("Chrome driver initialized.")
 
-        print("Navigating to EZDERM login page...")
+        print("Navigating to EZDERM login page: https://pms.ezderm.com/login")
         driver.get("https://pms.ezderm.com/login")
 
-        wait = WebDriverWait(driver, 20) # Increased wait time slightly for Heroku's environment
+        # Increased wait time for elements to appear, suitable for potentially slower cloud environments
+        wait = WebDriverWait(driver, 30)
         print("Locating username field...")
         username_field = wait.until(EC.presence_of_element_located((By.ID, "username")))
         print("Locating password field...")
+        # It's good practice to locate elements right before interacting with them
         password_field = driver.find_element(By.ID, "password")
 
         print("Entering credentials...")
@@ -150,9 +189,9 @@ def run_report_generation(report_type):
 
         print("Checking for dashboard URL...")
         wait.until(EC.url_to_be("https://pms.ezderm.com/dashboard"))
-        print("Login successful! Landed on dashboard: ", driver.current_url)
+        print(f"Login successful! Landed on dashboard: {driver.current_url}")
 
-        print("Navigating to Custom Reports page...")
+        print("Navigating to Custom Reports page: https://pms.ezderm.com/customReports")
         driver.get("https://pms.ezderm.com/customReports")
 
         report_titles = {
@@ -160,153 +199,221 @@ def run_report_generation(report_type):
             "weekly": "Weekly Signed Off Appointments",
             "monthly": "Monthly Signed Off Appointments"
         }
-        report_title = report_titles[report_type]
-        print(f"Locating {report_title} report...")
-        report_div = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, f"//div[contains(@class, 'styles_ChildItem__llCUk') and contains(text(), '{report_title}')]")
-        ))
+        report_title_to_find = report_titles[report_type]
+        print(f"Locating '{report_title_to_find}' report link...")
+        # Using the class name that was in the original script. PRD mentioned styles_ChildItem__11CUk
+        report_div_xpath = f"//div[contains(@class, 'styles_ChildItem__llCUk') and contains(text(), '{report_title_to_find}')]"
+        report_div = wait.until(EC.element_to_be_clickable((By.XPATH, report_div_xpath)))
         report_div.click()
+        print(f"Clicked on '{report_title_to_find}'.")
 
-        print("Generating CSV...")
-        csv_button = wait.until(EC.element_to_be_clickable(
-            (By.CSS_SELECTOR, "[data-pendo='button-generate-csv']")
-        ))
+        print("Locating and clicking 'Generate CSV' button...")
+        csv_button_selector = "[data-pendo='button-generate-csv']"
+        csv_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, csv_button_selector)))
         csv_button.click()
+        print("'Generate CSV' button clicked.")
 
-        print("Waiting for CSV download...")
-        # More robust download wait
-        time_to_wait = 20  # seconds
+        print(f"Waiting for CSV file to download to {download_dir}...")
+        time_to_wait_for_download = 30  # seconds
         time_counter = 0
-        csv_file = None
-        while time_counter < time_to_wait:
-            csv_files = glob.glob(os.path.join(download_dir, "*.csv"))
-            if csv_files:
-                csv_file = sorted(csv_files, key=os.path.getmtime, reverse=True)[0]
+        downloaded_csv_file = None
+        while time_counter < time_to_wait_for_download:
+            # Search for any CSV file in the download directory
+            csv_files_in_dir = glob.glob(os.path.join(download_dir, "*.csv"))
+            if csv_files_in_dir:
+                # Get the most recently modified CSV file
+                downloaded_csv_file = max(csv_files_in_dir, key=os.path.getmtime)
+                print(f"CSV file found: {downloaded_csv_file}")
                 break
-            time.sleep(1)
+            time.sleep(1) # Wait 1 second before checking again
             time_counter += 1
         
-        if not csv_file:
-            all_files_in_download_dir = glob.glob(os.path.join(download_dir, "*"))
-            print(f"Debug: Files in download dir ({download_dir}): {all_files_in_download_dir}")
-            raise Exception(f"CSV file not found in downloads folder ({download_dir}) after {time_to_wait} seconds.")
-        print(f"CSV downloaded: {csv_file}")
-
-        print("Processing CSV...")
-        providers = {
+        if not downloaded_csv_file:
+            # For debugging, list files if CSV is not found
+            all_files_in_download_dir = glob.glob(os.path.join(download_dir, "*.*")) # List all files
+            print(f"Debug: Files currently in download dir ({download_dir}): {all_files_in_download_dir}")
+            raise Exception(f"CSV file not found in {download_dir} after {time_to_wait_for_download} seconds.")
+        
+        print(f"Processing CSV file: {downloaded_csv_file}...")
+        # Provider names as per PRD
+        providers_counts = {
             'Kayela Asplund, NP': 0,
             'Samantha Conklin, NP': 0,
             'Jonathan Hayward, PA': 0
         }
-        with open(csv_file, 'r', encoding='utf-8') as f:
+        with open(downloaded_csv_file, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            for row in reader:
-                if not row or not row[0]:
+            # The script assumes provider counts are in a specific format "Provider Name: Count"
+            # PRD mentioned investigating summary rows, this logic parses all rows.
+            for row_index, row_data in enumerate(reader):
+                if not row_data or not row_data[0]: # Skip empty rows or rows with empty first cell
                     continue
-                cell = row[0].strip()
-                for provider_name in providers: # Renamed 'provider' to 'provider_name' to avoid conflict
-                    if provider_name in cell:
+                cell_content = row_data[0].strip()
+                for provider_name_key in providers_counts.keys():
+                    if provider_name_key in cell_content:
                         try:
-                            count_str = cell.split(":")[-1].strip()
+                            # Assuming format "Provider Name: Count"
+                            count_str = cell_content.split(":")[-1].strip()
                             count = int(count_str)
-                            providers[provider_name] = count
+                            providers_counts[provider_name_key] = count
+                            print(f"Found count for {provider_name_key}: {count}")
                         except (ValueError, IndexError) as parse_error:
-                            print(f"Warning: Could not parse count for {provider_name} in row: '{cell}'. Error: {parse_error}")
+                            print(f"Warning: Could not parse count for {provider_name_key} in row {row_index+1}: '{cell_content}'. Error: {parse_error}")
 
-        today = datetime.now(cst)
-        period, period_text = get_report_period(report_type, today)
+        # Determine reporting period details using the current time in CST
+        current_time_cst = datetime.now(cst) # Get fresh current time for report metadata
+        period_str, period_text_for_email = get_report_period(report_type, current_time_cst)
         
+        # Construct email subject line based on PRD format
         subject_prefix = f"Lilly Derm {report_type.capitalize()} Appointment Report"
         if report_type == "daily":
-            subject = f"{subject_prefix} - {today.strftime('%Y-%m-%d')}"
+            # Use the date for which the report was generated (today_cst from get_report_period)
+            subject = f"{subject_prefix} - {current_time_cst.strftime('%Y-%m-%d')}"
         elif report_type == "weekly":
-            start_date_for_subject = today - timedelta(days=6)
-            subject = f"{subject_prefix} - {start_date_for_subject.strftime('%Y-%m-%d')} to {today.strftime('%Y-%m-%d')}"
+            # period_str from get_report_period for weekly is "YYYY-MM-DD to YYYY-MM-DD"
+            subject = f"{subject_prefix} - {period_str}"
         elif report_type == "monthly":
-            prev_month_obj = today.replace(day=1) - timedelta(days=1)
-            subject = f"{subject_prefix} - {prev_month_obj.strftime('%Y-%B')}"
-        else:
-            subject = f"{subject_prefix} - {period}"
+            # period_str from get_report_period for monthly is "YYYY-MonthName"
+            subject = f"{subject_prefix} - {period_str.replace('-', ' ')}" # Change YYYY-Month to YYYY Month
+        else: # Fallback, should not be reached if report_type is validated
+            subject = f"{subject_prefix} - {period_str}"
 
-        html_body = f"""
-        <html><body><p>Hey Tony,</p><p>{period_text}</p><p><strong>Appointment counts:</strong></p><ul>
+        # Format HTML email body
+        html_body_content = f"""
+        <html>
+        <body>
+        <p>Hey Tony,</p>
+        <p>{period_text_for_email}</p>
+        <p><strong>Appointment counts:</strong></p>
+        <ul>
         """
-        for provider_name, count in providers.items(): # Renamed 'provider'
-            html_body += f"<li><b>{provider_name}:</b> {count} Completed Appointments</li>"
-        html_body += "</ul><p>This is an automated report.</p></body></html>"
+        for provider_name_item, count_item in providers_counts.items():
+            html_body_content += f"<li><b>{provider_name_item}:</b> {count_item} Completed Appointments</li>"
+        html_body_content += """
+        </ul>
+        <p>This is an automated report generated by the EZDERM Reporting System.</p>
+        </body>
+        </html>
+        """
 
-        # Sending to your email for testing, change to tony@lillydermmd.com for production
-        target_email = os.getenv("REPORT_RECIPIENT_EMAIL", "tony@lillydermmd.com") # Default to your email
-        send_email(subject, html_body, target_email, csv_file)
-        print(f"Email sent successfully to {target_email}!")
+        # Send email with CSV attachment to the primary client recipient
+        report_recipient = os.getenv("REPORT_RECIPIENT_EMAIL", "tony@lillydermmd.com") # Default to Tony
+        print(f"Sending {report_type} report email to {report_recipient}...")
+        send_email(subject, html_body_content, report_recipient, downloaded_csv_file)
 
-        print(f"Deleting CSV file: {csv_file}...")
-        os.remove(csv_file)
+        # Delete CSV for HIPAA compliance after successful processing and email dispatch
+        print(f"Deleting CSV file for HIPAA compliance: {downloaded_csv_file}...")
+        os.remove(downloaded_csv_file)
         print("CSV file deleted.")
 
     except Exception as e:
-        error_subject = "EZDERM Reporter Error (Heroku)"
+        error_subject = f"EZDERM Reporter Error (Heroku) - {report_type.capitalize()}"
         error_message_detail = str(e)
-        current_url_info = "\nDriver not initialized or URL not available"
-        page_source_info = "\nPage source not available"
+        current_url_info = "\nDriver not initialized or URL not available."
+        page_source_info = "\nPage source not available."
 
-        if driver: # Check if driver was initialized
+        if driver: # Check if driver object exists
             try:
                 current_url_info = f"\n\nCurrent URL: {driver.current_url}"
-            except:
-                current_url_info = "\nCould not retrieve current URL from driver."
+            except Exception as url_err:
+                current_url_info = f"\nCould not retrieve current URL from driver: {url_err}"
             try:
-                page_source_info = f"\nPage source snippet (first 1000 chars): {driver.page_source[:1000]}"
-            except:
-                page_source_info = "\nCould not retrieve page source from driver."
+                page_source_info = f"\nPage source snippet (first 1000 chars):\n{driver.page_source[:1000]}"
+            except Exception as ps_err:
+                page_source_info = f"\nCould not retrieve page source from driver: {ps_err}"
             
-            # --- HEROKU CHANGE: Screenshot path to /tmp ---
+            # Screenshot path for Heroku's ephemeral filesystem
             error_screenshot_path = "/tmp/error.png"
             try:
                 driver.save_screenshot(error_screenshot_path)
-                print(f"Screenshot saved as {error_screenshot_path}")
-                # Note: Accessing this screenshot from Heroku directly is hard.
-                # It's mainly for logs if you could somehow retrieve it or if the error message is descriptive enough.
+                print(f"Error screenshot saved to {error_screenshot_path} (ephemeral on Heroku).")
+                # Note: Accessing this screenshot from Heroku logs directly is difficult.
+                # It's mainly for confirming if screenshot capture works. The error details in email are more critical.
             except Exception as screenshot_error:
-                print(f"Failed to save screenshot: {screenshot_error}")
+                print(f"Failed to save error screenshot: {screenshot_error}")
         
-        error_body_html = f"An error occurred during the EZDERM report generation on Heroku:<br><pre>{error_message_detail}</pre>"
-        error_body_html += current_url_info.replace('\n', '<br>')
-        error_body_html += page_source_info.replace('\n', '<br>')
+        # Construct error body for email (HTML formatted)
+        error_body_html = (f"An error occurred during the EZDERM '{report_type}' report generation on Heroku:<br>"
+                           f"<pre>Error: {error_message_detail}</pre>"
+                           f"{current_url_info.replace(chr(10), '<br>')}" # Replace newline for HTML
+                           f"{page_source_info.replace(chr(10), '<br>')}") # Replace newline for HTML
         
-        print(f"Error: {error_message_detail}")
-        print(error_body_html) # For Heroku logs (CloudWatch equivalent)
+        print(f"Error: {error_message_detail}") # Log raw error to Heroku console
+        print(f"Detailed error info for email:\n{error_body_html}") # Log HTML error body for debugging
         
-        admin_email = os.getenv("ADMIN_EMAIL", "gio@gervainlabs.com") # Default to your email
-        if email_address and email_password: # Check if email sending is possible
-            try:
-                send_email(error_subject, error_body_html, admin_email)
-                print(f"Error notification sent to {admin_email}.")
-            except Exception as email_error:
-                print(f"CRITICAL: Failed to send error notification email: {email_error}")
+        # Send error notification to system admin
+        admin_email_recipient = os.getenv("ADMIN_EMAIL", "gio@gervainlabs.com") # Default admin email
+        if email_address and email_password: # Check if sender credentials are set
+            print(f"Sending error notification to {admin_email_recipient}...")
+            send_email(error_subject, error_body_html, admin_email_recipient)
         else:
-            print("Cannot send error email: EMAIL_ADDRESS or EMAIL_PASSWORD not set.")
-        raise # Re-raise for Heroku to log the failure
+            print(f"Cannot send error notification to {admin_email_recipient}: Sender email credentials not set.")
+        raise # Re-raise the exception to mark the Heroku job as failed
     finally:
         if driver:
             print("Closing browser...")
             driver.quit()
+            print("Browser closed.")
 
 if __name__ == "__main__":
+    # This block is executed when the script is run directly (e.g., by Heroku Scheduler)
     if len(sys.argv) > 1:
         report_type_arg = sys.argv[1].lower()
     else:
-        print("Report type (daily, weekly, monthly) argument missing. Defaulting to 'daily'.")
+        # Default to 'daily' if no argument is provided, though Heroku Scheduler should always provide one.
+        print("Warning: Report type (daily, weekly, monthly) argument missing. Defaulting to 'daily'.")
         report_type_arg = 'daily'
 
+    # Validate the report_type argument
     if report_type_arg not in ["daily", "weekly", "monthly"]:
-        print(f"Error: Invalid report type '{report_type_arg}'. Must be 'daily', 'weekly', or 'monthly'.")
-        sys.exit(1)
+        print(f"Error: Invalid report type argument '{report_type_arg}'. Must be 'daily', 'weekly', or 'monthly'.")
+        sys.exit(1) # Exit with error code
 
-    try:
-        print(f"Starting {report_type_arg.capitalize()} report generation process on Heroku...")
-        run_report_generation(report_type_arg)
-        print(f'{report_type_arg.capitalize()} report processed successfully.')
-    except Exception as main_exception:
-        print(f"Critical error during {report_type_arg} report generation: {main_exception}")
-        sys.exit(1) # Indicate failure
+    # Get the current time in CST for scheduler logic
+    # The 'cst' timezone object should be defined globally earlier in the script.
+    current_datetime_cst = datetime.now(cst)
+    
+    proceed_with_report_generation = False # Flag to control execution
+
+    print(f"Scheduler invoked for '{report_type_arg}' report. Current CST time: {current_datetime_cst.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")
+
+    if report_type_arg == "daily":
+        # PRD: Daily Report to run every weekday (Monday to Friday).
+        # datetime.weekday(): Monday is 0 and Sunday is 6.
+        if current_datetime_cst.weekday() < 5: # 0 (Mon), 1 (Tue), 2 (Wed), 3 (Thu), 4 (Fri)
+            print(f"Today is {current_datetime_cst.strftime('%A')} (weekday). Proceeding with '{report_type_arg}' report generation.")
+            proceed_with_report_generation = True
+        else:
+            print(f"Today is {current_datetime_cst.strftime('%A')} (weekend). '{report_type_arg}' report runs only on weekdays. Skipping actual report generation.")
+    
+    elif report_type_arg == "weekly":
+        # PRD: Weekly Report to run every Sunday.
+        if current_datetime_cst.weekday() == 6: # 6 corresponds to Sunday.
+            print(f"Today is Sunday. Proceeding with '{report_type_arg}' report generation.")
+            proceed_with_report_generation = True
+        else:
+            print(f"Today is {current_datetime_cst.strftime('%A')}. '{report_type_arg}' report runs only on Sunday. Skipping actual report generation.")
+
+    elif report_type_arg == "monthly":
+        # PRD: Monthly Report to run on the 1st day of every month.
+        if current_datetime_cst.day == 1:
+            print(f"Today is the 1st of the month. Proceeding with '{report_type_arg}' report generation.")
+            proceed_with_report_generation = True
+        else:
+            print(f"Today is the {current_datetime_cst.day}. '{report_type_arg}' report runs only on the 1st of the month. Skipping actual report generation.")
+
+    if proceed_with_report_generation:
+        try:
+            print(f"Conditions met. Starting main logic for {report_type_arg.capitalize()} report...")
+            run_report_generation(report_type_arg)
+            print(f"Successfully completed {report_type_arg.capitalize()} report generation and processing.")
+            sys.exit(0) # Indicate successful execution
+        except Exception as e:
+            # Errors within run_report_generation should be caught and handled there (including email notifications)
+            # This catch is a final fallback.
+            print(f"Critical unhandled error during {report_type_arg.capitalize()} report execution in __main__: {e}")
+            sys.exit(1) # Indicate failure
+    else:
+        # If not proceeding, the script has already printed a message. Exit gracefully.
+        print(f"Skipped full report generation for '{report_type_arg}' as per schedule logic.")
+        sys.exit(0) # Indicate successful completion of the scheduler check (even if report was skipped).
