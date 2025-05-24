@@ -96,7 +96,7 @@ def get_report_period(report_type, today_in_cst):
     else:
         raise ValueError(f"Invalid report type: {report_type}")
 
-def send_email(subject, html_body, to_email, attachment_path=None):
+def send_email(subject, html_body, to_email, cc_email=None, attachment_path=None):
     """
     Sends an email with optional attachment.
     Args:
@@ -112,6 +112,8 @@ def send_email(subject, html_body, to_email, attachment_path=None):
     msg = MIMEMultipart()
     msg['From'] = email_address
     msg['To'] = to_email
+    if cc_email:  # checks if cc_email is not None and not an empty string
+        msg['Cc'] = cc_email
     msg['Subject'] = subject
     msg.attach(MIMEText(html_body, 'html'))
 
@@ -297,9 +299,10 @@ def run_report_generation(report_type):
         """
 
         # Send email with CSV attachment to the primary client recipient
-        report_recipient = os.getenv("REPORT_RECIPIENT_EMAIL", "tony@lillydermmd.com") # Default to Tony
+        report_recipient = os.environ.get("REPORT_RECIPIENT_EMAIL", "tony@lillydermmd.com") # Default to Tony
+        cc_report_recipient = os.getenv("CC_RECIPIENT_EMAIL") # CC recipient from environment variable
         print(f"Sending {report_type} report email to {report_recipient}...")
-        send_email(subject, html_body_content, report_recipient, downloaded_csv_file)
+        send_email(subject, html_body_content, report_recipient, cc_report_recipient, downloaded_csv_file)
 
         # Delete CSV for HIPAA compliance after successful processing and email dispatch
         print(f"Deleting CSV file for HIPAA compliance: {downloaded_csv_file}...")
