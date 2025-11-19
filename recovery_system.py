@@ -155,31 +155,38 @@ def post_to_ghl_api(records, credentials):
         print("ERROR: GHL_API_KEY or GHL_LOCATION_ID not configured. Cannot post to GHL.")
         return (0, len(records))
     
-    api_url = "https://services.leadconnectorhq.com/contacts/"
+    # Use upsert endpoint to handle existing contacts
+    api_url = "https://services.leadconnectorhq.com/contacts/upsert"
     headers = {
-        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "Version": "2021-07-28"  # GHL API version
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}"
     }
-    
+
     success_count = 0
     failure_count = 0
-    
+
     print(f"Posting {len(records)} records to GoHighLevel API...")
-    
+
     for index, record in enumerate(records, start=1):
         # Build API payload (minimal PHI - only what's needed for recovery)
+        first_name = record['first_name']
+        last_name = record['last_name']
+        full_name = f"{first_name} {last_name}".strip()
+
         payload = {
-            "firstName": record['first_name'],
-            "lastName": record['last_name'],
+            "firstName": first_name,
+            "lastName": last_name,
+            "name": full_name,  # Required by GHL API
             "phone": record['phone'],
             "locationId": location_id,
             "tags": ["Recovery-Pending", "EZDERM-Import"],
             "customFields": [
-                {"key": "appointment_date", "value": record.get('appointment_date', '')},
-                {"key": "appointment_status", "value": record.get('appointment_status', '')},
-                {"key": "import_date", "value": datetime.now(CST).strftime('%Y-%m-%d')}
-            ]
+                {"key": "appointment_date", "field_value": record.get('appointment_date', '')},
+                {"key": "appointment_status", "field_value": record.get('appointment_status', '')},
+                {"key": "import_date", "field_value": datetime.now(CST).strftime('%Y-%m-%d')}
+            ],
+            "source": "EZDERM Import"
         }
         
         try:
@@ -192,7 +199,13 @@ def post_to_ghl_api(records, credentials):
             else:
                 failure_count += 1
                 # Log error without PHI (no names/phones in logs)
-                print(f"Warning: Record {index} failed. Status {response.status_code}: {response.text[:100]}")
+                print(f"Warning: Record {index} failed. Status {response.status_code}")
+                print(f"Response: {response.text}")
+                # On first failure, print full request details (without PHI)
+                if failure_count == 1:
+                    print(f"Debug - API URL: {api_url}")
+                    print(f"Debug - Headers: {headers}")
+                    print(f"Debug - Location ID: {location_id}")
                 
         except requests.RequestException as e:
             failure_count += 1
