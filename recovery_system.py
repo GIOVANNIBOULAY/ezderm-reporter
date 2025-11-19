@@ -189,7 +189,6 @@ def post_to_ghl_api(records, credentials):
             "lastName": last_name,
             "name": full_name,  # Required by GHL API
             "phone": record['phone'],
-            "email": record.get('email', ''),  # Optional email field
             "locationId": location_id,
             "tags": ["Recovery-Pending", "EZDERM-Import"],
             "customFields": [
@@ -201,6 +200,11 @@ def post_to_ghl_api(records, credentials):
             ],
             "source": "EZDERM Import"
         }
+
+        # Only include email if it's not empty and contains @ (basic validation)
+        email = record.get('email', '').strip()
+        if email and '@' in email:
+            payload["email"] = email
         
         try:
             response = requests.post(api_url, json=payload, headers=headers, timeout=10)
