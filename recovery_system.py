@@ -160,7 +160,8 @@ def post_to_ghl_api(records, credentials):
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "Authorization": f"Bearer {api_key}"
+        "Authorization": f"Bearer {api_key}",
+        "Version": "2021-07-28"  # Required by GHL API
     }
 
     success_count = 0
