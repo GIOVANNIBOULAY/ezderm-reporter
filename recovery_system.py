@@ -44,6 +44,7 @@ from ezderm_common import (
     load_credentials,
     initialize_chrome_driver,
     login_to_ezderm,
+    safe_click,
     wait_for_csv_download,
     cleanup_downloaded_files,
     send_error_notification,
@@ -244,18 +245,15 @@ def main():
         # Locate and click the saved "Recovery-System-Daily" report
         report_title = "Recovery-System-Daily"
         print(f"Locating saved report: '{report_title}'...")
-        
-        wait = WebDriverWait(driver, 30)
+
         report_div_xpath = f"//div[contains(@class, 'styles_ChildItem__llCUk') and contains(text(), '{report_title}')]"
-        report_div = wait.until(EC.element_to_be_clickable((By.XPATH, report_div_xpath)))
-        report_div.click()
+        safe_click(driver, (By.XPATH, report_div_xpath))
         print(f"Clicked on '{report_title}' report.")
-        
+
         # Click "Generate CSV" button
         print("Generating CSV export...")
         csv_button_selector = "[data-pendo='button-generate-csv']"
-        csv_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, csv_button_selector)))
-        csv_button.click()
+        safe_click(driver, (By.CSS_SELECTOR, csv_button_selector))
         print("CSV generation initiated.")
         
         # Wait for CSV download (using shared library function)

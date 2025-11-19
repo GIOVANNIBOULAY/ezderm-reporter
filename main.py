@@ -1,76 +1,38 @@
+"""
+main.py    EZDERM Report Automation Script
+"""
+
+
 import json
 import os
 import time
-import glob
 import csv
-import smtplib
-import requests
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
 from datetime import datetime, timedelta
 import pytz
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
+import sys
+import requests
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from dotenv import load_dotenv # Good for local testing, Heroku will use Config Vars
-import sys
 
-# Load environment variables from .env file (for local development)
-# On Heroku, these will be set as Config Vars
-load_dotenv()
+# Import shared EZDERM automation library
+from ezderm_common import (
+    load_credentials,
+    initialize_chrome_driver,
+    login_to_ezderm,
+    safe_click,
+    wait_for_csv_download,
+    cleanup_downloaded_files,
+    send_email,
+    send_error_notification,
+    close_driver_safely
+)
 
-# Get credentials from environment variables
-username = os.getenv('EZDERM_USERNAME')
-password = os.getenv('EZDERM_PASSWORD')
-email_address = os.getenv('EMAIL_ADDRESS') # Email used to send reports
-email_password = os.getenv('EMAIL_PASSWORD') # App password for the sender email
-zap_webhook_url = os.getenv('ZAP_WEBHOOK_URL')
+# Note: Selenium imports now handled by ezderm_common
+# Note: SMTP/email imports now handled by ezderm_common
 
-# Client time zone (CST/CDT)
-# This is used for determining report periods and for the scheduler workaround logic.
+# Client time zone (CST/CDT) - used for report scheduling
 cst = pytz.timezone("America/Chicago")
-
-# Set up download directory - Heroku allows writing to /tmp
-download_dir = "/tmp/downloads"
-os.makedirs(download_dir, exist_ok=True)
-
-# Set up Chrome options for Heroku
-chrome_options = Options()
-chrome_options.add_argument("--headless")
-chrome_options.add_argument("--disable-gpu")
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-# chrome_options.add_argument("--single-process") # Often not needed
-
-# Use Chrome binary location provided by Heroku buildpack
-chrome_bin_path = os.getenv('GOOGLE_CHROME_BIN')
-if chrome_bin_path:
-    chrome_options.binary_location = chrome_bin_path
-else:
-    # This print statement will appear in Heroku logs if the variable isn't set.
-    print("Warning: GOOGLE_CHROME_BIN environment variable not set. Relying on Chrome being in PATH.")
-
-# Configure downloads preferences for Chrome
-chrome_options.add_experimental_option("prefs", {
-    "download.default_directory": download_dir,
-    "download.prompt_for_download": False,
-    "download.directory_upgrade": True,
-    "safebrowsing.enabled": True # Ensures that downloads are not blocked by safebrowsing
-})
-
-# Use ChromeDriver path provided by Heroku buildpack or rely on it being in PATH
-chromedriver_path = os.getenv('CHROMEDRIVER_PATH')
-if chromedriver_path:
-    print(f"Using CHROMEDRIVER_PATH: {chromedriver_path}")
-    service = Service(executable_path=chromedriver_path)
-else:
-    print("Warning: CHROMEDRIVER_PATH environment variable not set. Relying on chromedriver being in PATH.")
-    service = Service() # Selenium will attempt to find chromedriver in the system PATH
 
 def get_report_period(report_type, today_in_cst):
     """
@@ -98,60 +60,14 @@ def get_report_period(report_type, today_in_cst):
     else:
         raise ValueError(f"Invalid report type: {report_type}")
 
-def send_email(subject, html_body, to_email, cc_email=None, attachment_path=None):
-    """
-    Sends an email with optional attachment.
-    Args:
-        subject (str): Email subject.
-        html_body (str): Email body in HTML format.
-        to_email (str): Recipient's email address.
-        attachment_path (str, optional): Path to the file to attach. Defaults to None.
-    """
-    if not email_address or not email_password:
-        print("Error: Sender email address or password not configured. Cannot send email.")
-        return
-
-    msg = MIMEMultipart()
-    msg['From'] = email_address
-    msg['To'] = to_email
-    if cc_email:  # checks if cc_email is not None and not an empty string
-        msg['Cc'] = cc_email
-    msg['Subject'] = subject
-    msg.attach(MIMEText(html_body, 'html'))
-
-    if attachment_path:
-        try:
-            with open(attachment_path, 'rb') as f:
-                part = MIMEBase('application', 'octet-stream')
-                part.set_payload(f.read())
-            encoders.encode_base64(part)
-            part.add_header(
-                'Content-Disposition',
-                f'attachment; filename="{os.path.basename(attachment_path)}"' # Added quotes for safety
-            )
-            msg.attach(part)
-        except FileNotFoundError:
-            print(f"Error: Attachment file not found at {attachment_path}. Email will be sent without attachment.")
-        except Exception as e:
-            print(f"Error attaching file {attachment_path}: {e}. Email will be sent without attachment.")
-
-
-    try:
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.starttls()
-            server.login(email_address, email_password)
-            server.send_message(msg)
-        print(f"Email sent successfully to {to_email}.")
-    except smtplib.SMTPAuthenticationError:
-        print("SMTP Authentication Error: Check email_address and email_password (App Password).")
-    except Exception as e:
-        print(f"Failed to send email to {to_email}: {e}")
-
-def send_to_zapier(data, webhook_url=zap_webhook_url):
+def send_to_zapier(data, credentials):
     """Send processed report data to a Zapier webhook."""
+    webhook_url = os.getenv('ZAP_WEBHOOK_URL')
+    
     if not webhook_url:
         print("Error: Zapier webhook URL is not configured. Cannot send data.")
         return
+    
     try:
         response = requests.post(webhook_url, json=data, timeout=10)
         response.raise_for_status()
@@ -182,31 +98,17 @@ def run_report_generation(report_type):
     driver = None # Initialize driver to None for the finally block
     try:
         print(f"Initializing Chrome driver for {report_type} report...")
-        driver = webdriver.Chrome(service=service, options=chrome_options)
+        # Load credentials from environment
+        credentials = load_credentials()
+   
+        # Initialize Chrome WebDriver
+        download_dir = "/tmp/downloads"
+        driver = initialize_chrome_driver(download_dir)
         print("Chrome driver initialized.")
 
         print("Navigating to EZDERM login page: https://pms.ezderm.com/login")
-        driver.get("https://pms.ezderm.com/login")
-
-        # Increased wait time for elements to appear, suitable for potentially slower cloud environments
-        wait = WebDriverWait(driver, 30)
-        print("Locating username field...")
-        username_field = wait.until(EC.presence_of_element_located((By.ID, "username")))
-        print("Locating password field...")
-        # It's good practice to locate elements right before interacting with them
-        password_field = driver.find_element(By.ID, "password")
-
-        print("Entering credentials...")
-        username_field.send_keys(username)
-        password_field.send_keys(password)
-
-        print("Clicking login button...")
-        login_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@type='submit']")))
-        login_button.click()
-
-        print("Checking for dashboard URL...")
-        wait.until(EC.url_to_be("https://pms.ezderm.com/dashboard"))
-        print(f"Login successful! Landed on dashboard: {driver.current_url}")
+        # Login to EZDERM
+        login_to_ezderm(driver, credentials['ezderm_username'], credentials['ezderm_password'])
 
         print("Navigating to Custom Reports page: https://pms.ezderm.com/customReports")
         driver.get("https://pms.ezderm.com/customReports")
@@ -218,38 +120,21 @@ def run_report_generation(report_type):
         }
         report_title_to_find = report_titles[report_type]
         print(f"Locating '{report_title_to_find}' report link...")
-        # Using the class name that was in the original script. PRD mentioned styles_ChildItem__11CUk
+
         report_div_xpath = f"//div[contains(@class, 'styles_ChildItem__llCUk') and contains(text(), '{report_title_to_find}')]"
-        report_div = wait.until(EC.element_to_be_clickable((By.XPATH, report_div_xpath)))
-        report_div.click()
+        safe_click(driver, (By.XPATH, report_div_xpath))
         print(f"Clicked on '{report_title_to_find}'.")
 
         print("Locating and clicking 'Generate CSV' button...")
         csv_button_selector = "[data-pendo='button-generate-csv']"
-        csv_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, csv_button_selector)))
-        csv_button.click()
+        safe_click(driver, (By.CSS_SELECTOR, csv_button_selector))
         print("'Generate CSV' button clicked.")
 
         print(f"Waiting for CSV file to download to {download_dir}...")
         time_to_wait_for_download = 30  # seconds
         time_counter = 0
-        downloaded_csv_file = None
-        while time_counter < time_to_wait_for_download:
-            # Search for any CSV file in the download directory
-            csv_files_in_dir = glob.glob(os.path.join(download_dir, "*.csv"))
-            if csv_files_in_dir:
-                # Get the most recently modified CSV file
-                downloaded_csv_file = max(csv_files_in_dir, key=os.path.getmtime)
-                print(f"CSV file found: {downloaded_csv_file}")
-                break
-            time.sleep(1) # Wait 1 second before checking again
-            time_counter += 1
-        
-        if not downloaded_csv_file:
-            # For debugging, list files if CSV is not found
-            all_files_in_download_dir = glob.glob(os.path.join(download_dir, "*.*")) # List all files
-            print(f"Debug: Files currently in download dir ({download_dir}): {all_files_in_download_dir}")
-            raise Exception(f"CSV file not found in {download_dir} after {time_to_wait_for_download} seconds.")
+        # Wait for CSV download
+        downloaded_csv_file = wait_for_csv_download(download_dir, timeout_seconds=60)
         
         print(f"Processing CSV file: {downloaded_csv_file}...")
         # Provider names as per PRD
@@ -289,12 +174,10 @@ def run_report_generation(report_type):
             "counts": providers_counts
         }
         print("Sending processed data to Zapier webhook...")
-        send_to_zapier(report_data)
+        send_to_zapier(report_data, credentials)
 
-        # Delete CSV for HIPAA compliance after successfully sending data
-        print(f"Deleting CSV file for HIPAA compliance: {downloaded_csv_file}...")
-        os.remove(downloaded_csv_file)
-        print("CSV file deleted.")
+        # Delete CSV for HIPAA compliance
+        cleanup_downloaded_files(download_dir)
 
     except Exception as e:
         error_subject = f"EZDERM Reporter Error (Heroku) - {report_type.capitalize()}"
@@ -331,19 +214,11 @@ def run_report_generation(report_type):
         print(f"Error: {error_message_detail}") # Log raw error to Heroku console
         print(f"Detailed error info for email:\n{error_body_html}") # Log HTML error body for debugging
         
-        # Send error notification to system admin
-        admin_email_recipient = os.getenv("ADMIN_EMAIL", "gio@gervainlabs.com") # Default admin email
-        if email_address and email_password: # Check if sender credentials are set
-            print(f"Sending error notification to {admin_email_recipient}...")
-            send_email(error_subject, error_body_html, admin_email_recipient)
-        else:
-            print(f"Cannot send error notification to {admin_email_recipient}: Sender email credentials not set.")
-        raise # Re-raise the exception to mark the Heroku job as failed
-    finally:
-        if driver:
-            print("Closing browser...")
-            driver.quit()
-            print("Browser closed.")
+        # Send error notification
+        send_error_notification(e, driver, context=f"{report_type.capitalize()} Report", credentials=credentials)
+        
+        # Clean up resources
+        close_driver_safely(driver)
 
 if __name__ == "__main__":
     # This block is executed when the script is run directly (e.g., by Heroku Scheduler)

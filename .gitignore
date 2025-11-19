@@ -6,3 +6,8 @@ downloads/
 *.csv
 error.png
 .env
+.vscode/
+*.backup
+.DS_Store
+._*
+chromedriver

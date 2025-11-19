@@ -187,37 +187,85 @@ def login_to_ezderm(driver, username, password):
         - Enters credentials and submits form
         - Waits for post-login page load
     """
-    login_url = "https://pms.ezderm.com/"
+    login_url = "https://pms.ezderm.com/login"
     print(f"Navigating to EZDERM login page: {login_url}")
     driver.get(login_url)
-    
+
     # Wait for login page to load and find username field
     print("Waiting for login page elements...")
     wait = WebDriverWait(driver, 30)
-    
+
     # Locate and fill username field
     username_field = wait.until(
-        EC.presence_of_element_located((By.ID, "txtUserName"))
+        EC.presence_of_element_located((By.ID, "username"))
     )
     username_field.clear()
     username_field.send_keys(username)
     print("Username entered.")
-    
+
     # Locate and fill password field
-    password_field = driver.find_element(By.ID, "txtPassword")
+    password_field = driver.find_element(By.ID, "password")
     password_field.clear()
     password_field.send_keys(password)
     print("Password entered (not logged for security).")
-    
-    # Submit login form
-    login_button = driver.find_element(By.ID, "butLogin")
+
+    # Submit login form - wait for button to be clickable
+    login_button = wait.until(
+        EC.element_to_be_clickable((By.XPATH, "//button[@type='submit']"))
+    )
     login_button.click()
     print("Login form submitted.")
-    
-    # Wait for redirect after successful login (wait for URL change)
-    print("Waiting for post-login page load...")
-    wait.until(lambda d: d.current_url != login_url)
-    print(f"Login successful. Current URL: {driver.current_url}")
+
+    # Wait for redirect to dashboard to confirm successful login
+    print("Waiting for dashboard URL...")
+    wait.until(EC.url_to_be("https://pms.ezderm.com/dashboard"))
+    print(f"Login successful! Landed on dashboard: {driver.current_url}")
+
+
+def safe_click(driver, locator, wait_time=30, retry_count=3):
+    """
+    Click an element with retry logic to handle timing issues.
+
+    Args:
+        driver (webdriver.Chrome): Selenium WebDriver instance
+        locator (tuple): Selenium locator tuple (By.X, "selector")
+        wait_time (int): Maximum wait time in seconds (default: 30)
+        retry_count (int): Number of retry attempts (default: 3)
+
+    Returns:
+        None
+
+    Raises:
+        Exception: If element still not clickable after all retries
+
+    Implementation:
+        - Waits for element to be clickable
+        - Adds short delay to let page settle
+        - Retries if "element click intercepted" error occurs
+        - Useful for dynamic pages with overlays/modals
+    """
+    wait = WebDriverWait(driver, wait_time)
+
+    for attempt in range(retry_count):
+        try:
+            # Wait for element to be clickable
+            element = wait.until(EC.element_to_be_clickable(locator))
+
+            # Add small delay to let any animations/overlays settle
+            time.sleep(1)
+
+            # Attempt the click
+            element.click()
+            return  # Success - exit function
+
+        except Exception as e:
+            error_msg = str(e)
+            if "element click intercepted" in error_msg and attempt < retry_count - 1:
+                print(f"Click intercepted (attempt {attempt + 1}/{retry_count}). Retrying in 2 seconds...")
+                time.sleep(2)
+            else:
+                # Final attempt failed or different error - raise it
+                raise
 
 
 # =============================================================================
