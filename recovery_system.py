@@ -100,16 +100,25 @@ def parse_recovery_csv(csv_file_path):
             if not row or not any(row):
                 continue
             
-            # Build dictionary from row (assuming standard column order)
-            # Column indices based on typical EZDERM export
+            # Build dictionary from row
+            # Column order: MRN, Patient Name, Phone, Email, Appt Date, Provider, Status, Clinic, Gender, City, DOB
             try:
+                # Parse Patient Name (column 1) into first and last names
+                full_name = row[1].strip() if len(row) > 1 else ''
+                name_parts = full_name.split(maxsplit=1)  # Split on first space only
+                first_name = name_parts[0] if len(name_parts) > 0 else ''
+                last_name = name_parts[1] if len(name_parts) > 1 else ''
+
                 record = {
-                    'first_name': row[0].strip() if len(row) > 0 else '',
-                    'last_name': row[1].strip() if len(row) > 1 else '',
-                    'phone': row[2].strip() if len(row) > 2 else '',
-                    'date_of_birth': row[3].strip() if len(row) > 3 else '',
-                    'appointment_date': row[4].strip() if len(row) > 4 else '',
-                    'appointment_status': row[5].strip() if len(row) > 5 else '',
+                    'first_name': first_name,
+                    'last_name': last_name,
+                    'phone': row[2].strip() if len(row) > 2 else '',           # Phone
+                    'email': row[3].strip() if len(row) > 3 else '',           # Email
+                    'appointment_date': row[4].strip() if len(row) > 4 else '', # Appt Date
+                    'provider': row[5].strip() if len(row) > 5 else '',        # Provider
+                    'appointment_status': row[6].strip() if len(row) > 6 else '', # Status
+                    'clinic': row[7].strip() if len(row) > 7 else '',          # Clinic
+                    'date_of_birth': row[10].strip() if len(row) > 10 else '', # DOB
                 }
                 
                 # Filter: Reject records with empty phone
@@ -180,11 +189,14 @@ def post_to_ghl_api(records, credentials):
             "lastName": last_name,
             "name": full_name,  # Required by GHL API
             "phone": record['phone'],
+            "email": record.get('email', ''),  # Optional email field
             "locationId": location_id,
             "tags": ["Recovery-Pending", "EZDERM-Import"],
             "customFields": [
                 {"key": "appointment_date", "field_value": record.get('appointment_date', '')},
                 {"key": "appointment_status", "field_value": record.get('appointment_status', '')},
+                {"key": "provider", "field_value": record.get('provider', '')},
+                {"key": "clinic", "field_value": record.get('clinic', '')},
                 {"key": "import_date", "field_value": datetime.now(CST).strftime('%Y-%m-%d')}
             ],
             "source": "EZDERM Import"
