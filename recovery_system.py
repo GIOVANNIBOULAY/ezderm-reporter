@@ -3,10 +3,11 @@ recovery_system.py - EZDERM Appointment Recovery Automation
 
 Project: P2P-2025-001-A (Automated Appointment Recovery System)
 Document ID: SYS-RECOVERY-001
-Version: 1.0.1
+Version: 1.0.2
 Change Log:
     - 2025-11-13: v1.0.0 - Initial skeleton structure (Steps 5.1-5.2)
     - 2025-11-13: v1.0.1 - Complete implementation (Steps 5.3-5.6)
+    - 2025-11-20: v1.0.2 - Replace custom fields with status-based tags
     Created: 2025-11-13
 Created: 2025-11-13
 Owner: Giovanni Boulay
@@ -139,22 +140,23 @@ def parse_recovery_csv(csv_file_path):
 def post_to_ghl_api(records, credentials):
     """
     Post appointment records to GoHighLevel CRM via Private Integrations API v2.0.
-    
-    API Endpoint: POST https://services.leadconnectorhq.com/contacts/
+
+    API Endpoint: POST https://services.leadconnectorhq.com/contacts/upsert
     Authentication: Bearer token (GHL_API_KEY)
-    
+
     Args:
         records (list): Appointment records from parse_recovery_csv()
         credentials (dict): Must contain 'ghl_api_key' and 'ghl_location_id'
-    
+
     Returns:
         tuple: (success_count, failure_count)
-    
+
     HIPAA Note: Transmits only necessary fields over HTTPS; no PHI logged
-    
+
     Implementation:
     - Creates/updates contact in GHL using phone as unique identifier
-    - Tags contact with "Recovery-Pending" for workflow triggering
+    - Tags contact with "Recovery-Pending", "EZDERM-Import", and status-specific tag
+    - Status tags: "no-show", "canceled", or "rescheduled" based on appointment_status
     - Handles API errors gracefully (continues on individual failures)
     """
     api_key = credentials.get('ghl_api_key')
@@ -184,20 +186,25 @@ def post_to_ghl_api(records, credentials):
         last_name = record['last_name']
         full_name = f"{first_name} {last_name}".strip()
 
+        # Build tags list with status-specific tag
+        tags = ["Recovery-Pending", "EZDERM-Import"]
+
+        # Add status-specific tag based on appointment_status
+        appointment_status = record.get('appointment_status', '').strip()
+        if appointment_status == "No-Show":
+            tags.append("no-show")
+        elif appointment_status == "Canceled":
+            tags.append("canceled")
+        elif appointment_status == "Rescheduled via SMS":
+            tags.append("rescheduled")
+
         payload = {
             "firstName": first_name,
             "lastName": last_name,
             "name": full_name,  # Required by GHL API
             "phone": record['phone'],
             "locationId": location_id,
-            "tags": ["Recovery-Pending", "EZDERM-Import"],
-            "customFields": [
-                {"key": "appointment_date", "field_value": record.get('appointment_date', '')},
-                {"key": "appointment_status", "field_value": record.get('appointment_status', '')},
-                {"key": "provider", "field_value": record.get('provider', '')},
-                {"key": "clinic", "field_value": record.get('clinic', '')},
-                {"key": "import_date", "field_value": datetime.now(CST).strftime('%Y-%m-%d')}
-            ],
+            "tags": tags,
             "source": "EZDERM Import"
         }
 
