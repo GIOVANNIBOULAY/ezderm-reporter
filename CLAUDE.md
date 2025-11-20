@@ -5,15 +5,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 **P2P-2025-001-A: Automated Appointment Recovery System**
-**Version:** 1.0.1 (Fully Operational)
+**Version:** 1.0.2 (Fully Operational)
 **Status:** ✅ Production-Ready
 
 This project automates two critical workflows for Lilly Dermatology practice:
 
-1. **Appointment Recovery System** (`recovery_system.py`) - Extracts no-show/canceled/rescheduled appointments from EZDERM PMS, posts to GoHighLevel CRM with recovery tags, triggering automated SMS campaigns
+1. **Appointment Recovery System** (`recovery_system.py`) - Extracts no-show/canceled/rescheduled appointments from EZDERM PMS, posts to GoHighLevel CRM with status-based tags, triggering automated SMS campaigns
    - **Status:** ✅ Fully operational - all tests passing
    - **Daily Volume:** 3-10 appointments
-   - **Success Rate:** 100% (as of 2025-11-19)
+   - **Success Rate:** 100% (as of 2025-11-20)
 
 2. **Appointment Reporting System** (`main.py`) - Generates daily/weekly/monthly signed-off appointment counts by provider and sends to Zapier webhook
    - **Status:** ✅ Operational since 2025-11-18
@@ -81,13 +81,16 @@ finally:
 
 3. **Saved Report Dependency**: Navigates to pre-configured EZDERM saved report named **"Recovery-System-Daily"** which must exist with filters: Date Range = "Today", Status = No Show + Canceled + Rescheduled via SMS
 
-4. **GHL API Integration** (FIXED 2025-11-19):
+4. **GHL API Integration** (UPDATED 2025-11-20):
    - Endpoint: `https://services.leadconnectorhq.com/contacts/upsert` (not /contacts/)
    - Headers: Content-Type, Accept, Authorization (Bearer token), **Version: 2021-07-28** (required!)
-   - Tags: `["Recovery-Pending", "EZDERM-Import"]`
-   - Custom Fields: appointment_date, appointment_status, provider, clinic, import_date
+   - **Status-Based Tags** (v1.0.2): Each contact receives 3 tags:
+     - `"Recovery-Pending"` - Triggers recovery workflow
+     - `"EZDERM-Import"` - Source tracking
+     - Status-specific tag: `"no-show"`, `"canceled"`, or `"rescheduled"` (based on appointment_status)
    - Email Validation: Only includes email if non-empty and contains "@"
    - Location ID: `12k0lVx3jiM7tlNaTptd` (set via GHL_LOCATION_ID env var)
+   - **Note**: Custom fields removed in v1.0.2 (required field IDs not available; simplified to tag-based approach)
 
 5. **Phone Validation**: Filters out records with empty phone numbers (SMS is primary recovery channel)
 
@@ -261,15 +264,26 @@ Both scripts parse EZDERM CSVs but with different structures:
   - Modify CSV reading loop (lines 148-165)
   - Uses pattern matching, not column-based parsing
 
-### Adding New GHL Custom Fields
+### Modifying GHL Tags or Adding New Status Types
 
-To track additional appointment data in GoHighLevel:
+The system uses status-based tags instead of custom fields (simplified in v1.0.2):
 
-1. Create custom field in GHL admin UI first (with exact key name)
-2. Add to `recovery_system.py:194-199` in `customFields` array
-3. Use `field_value` (not `value`) - this is the correct GHL API format
-4. Map from CSV data in `record` dictionary (parsed at line 112-122)
-5. Remember: email field requires validation (line 205-207)
+**To add a new appointment status tag:**
+1. Check if EZDERM report includes the new status in Column 6 (Status)
+2. Update `recovery_system.py:187-197` to add new status condition:
+   ```python
+   if appointment_status == "New Status Name":
+       tags.append("new-status-tag")
+   ```
+3. Test locally with `python recovery_system.py`
+4. Deploy to Heroku and verify tags appear in GHL
+
+**Current status mappings** (recovery_system.py:191-197):
+- "No-Show" → `"no-show"`
+- "Canceled" → `"canceled"`
+- "Rescheduled via SMS" → `"rescheduled"`
+
+**Note**: All contacts also receive `"Recovery-Pending"` and `"EZDERM-Import"` tags automatically.
 
 ## ISO 9001:2015 Documentation Standards
 
